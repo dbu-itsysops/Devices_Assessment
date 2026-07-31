@@ -4,6 +4,9 @@
 **Status:** Extraction in progress
 **Last updated:** 2026-07-31
 
+This is the *why*. For the *how*, see [setup.md](setup.md), [runbook.md](runbook.md),
+[data-dictionary.md](data-dictionary.md) and [join-model.md](join-model.md).
+
 ---
 
 ## 1. Objective
@@ -131,6 +134,28 @@ When we do reach remediation, the order is fixed:
 - ASM release is effectively one-way; re-adding requires Apple Configurator or an Authorized Reseller.
 - Freshservice is the only system with a genuinely reversible delete (Trash → `/restore`).
 
+### Decision 9 — Columns carry the source attribute name, not an alias
+
+*Original implementation:* extracted columns used invented short names — `Entra_LastSignIn`, `Intune_AadDeviceId`, `AD_PasswordLastSet`, `FS_SerialRaw`.
+
+*Decision:* every column is named `<Prefix>_<exactSourceAttributeName>`. Anything this tooling derives rather than reads carries a `_calc` suffix.
+
+*Rationale:* the alias was a second vocabulary to maintain. With ~60 merged columns, `Entra_LastSignIn` cannot be looked up anywhere — it has to be translated back to `approximateLastSignInDateTime` before the Graph documentation, the 14-day update caveat, or a Microsoft support case makes sense. Two of the aliases were also actively misleading: `AD_PasswordLastSet` is `pwdLastSet`, and `AD_LastLogonDate` is `lastLogonTimestamp`, which is *not* `lastLogon` and carries entirely different replication behaviour. The `_calc` suffix answers the follow-on question — whether a column can be looked up in vendor documentation at all, or whether it came from a judgement made here.
+
+Freshservice is the awkward case, because its `type_fields` keys carry a numeric suffix that is the *parent* asset type ID, so the key varies by asset type and cannot be a stable column name. Resolved three ways at once:
+
+- curated columns keep the attribute name with the suffix stripped — `FS_type_fields.serial_number`
+- the exact key as returned is kept beside it in `FS_serial_number_sourceKey_calc`
+- `06c-fs-type-fields-long.csv` carries *every* custom field under its exact key, known to the script or not
+
+The third file is the one that matters. The previous implementation read seven named fields and silently discarded every other custom attribute on every asset.
+
+### Decision 10 — Raw sidecars alongside every curated extract
+
+*Decision:* each phase writes the complete untransformed source response to `raw\<file>.jsonl` next to its curated CSV.
+
+*Rationale:* the curated CSVs are a deliberate subset, and subsets chosen before the data is understood are usually wrong. The sidecar means adding a column later is a re-read of a snapshot rather than another authenticated pull against production — and it makes "the extract never showed us that field" impossible.
+
 ---
 
 ## 4. Conventions
@@ -140,6 +165,7 @@ These are load-bearing. Breaking any of them causes joins to fail silently.
 | Convention | Why |
 |---|---|
 | Prefix every column with its source (`AD_`, `Entra_`, `Intune_`, `AP_`, `BL_`, `FS_`) | With 60 merged columns, you always know the provenance of a value |
+| After the prefix, use the **exact source attribute name**; suffix anything derived with `_calc` | A column is either something a vendor documents or something we decided. The name says which — see Decision 9 |
 | Lowercase all GUIDs at extraction | AD and Graph return different casing; Power Query merges are case-sensitive. Skipping this returns zero matches and looks like a data catastrophe |
 | Normalize serials: uppercase, strip separators, null out OEM placeholders | `To Be Filled By O.E.M.`, `Default string`, `System Serial Number` are common. Each one is a device that cannot be matched — a finding, not noise |
 | Set serial and GUID columns to **Text** in Power Query before merging | Otherwise `0012345` becomes the number `12345` and never matches again |
@@ -150,25 +176,29 @@ These are load-bearing. Breaking any of them causes joins to fail silently.
 
 ## 5. Extraction status
 
-| Phase | System | Method | Status |
-|---|---|---|---|
-| 1 | Active Directory | `Get-ADComputer`, RSAT module | Script delivered |
-| 2 | Entra ID | Graph, cert auth | Script delivered |
-| 3 | Intune (+ Autopilot, BitLocker) | Graph, cert auth | Script delivered |
-| 4 | Freshservice | REST API v2, Basic auth | Script delivered |
-| 5 | Apple School Manager | TBD — API or UI export | **Not started** |
+| Phase | System | Method | Script | Status |
+|---|---|---|---|---|
+| 1 | Active Directory | `Get-ADComputer`, RSAT module | `src/01-Export-ADComputers.ps1` | Script delivered |
+| 2 | Entra ID | Graph, cert auth | `src/02-Export-EntraDevices.ps1` | Script delivered |
+| 3 | Intune (+ Autopilot, BitLocker) | Graph, cert auth | `src/03-Export-IntuneDevices.ps1` | Script delivered |
+| 4 | Freshservice | REST API v2, Basic auth | `src/04-Export-Freshservice.ps1` | Script delivered |
+| 5 | Apple School Manager | TBD — API or UI export | — | **Not started** |
 
-Each phase produces one or more CSVs into `C:\estate-audit\<yyyy-MM-dd>\`.
+Each phase produces one or more CSVs into `C:\estate-audit\<yyyy-MM-dd>\`, with the
+untransformed source response alongside in `raw\`. `src/Invoke-Assessment.ps1` runs
+phases 1–4 into a single snapshot.
 
 ### Key fields by system
 
-**AD** — `ObjectGUID` (join key), `ObjectSID`, `PasswordLastSet` (best liveness signal — 30-day auto-rotation), `LastLogonDate`, `Enabled`, `OperatingSystem`, OU, `userCertificate` (hybrid-join candidate indicator)
+Column names below are as emitted. Full listing in [data-dictionary.md](data-dictionary.md).
 
-**Entra** — `deviceId` (join key), `trustType` (`ServerAd` / `AzureAd` / `Workplace` — determines cleanup path), `approximateLastSignInDateTime`, `accountEnabled`, `isManaged`, `onPremisesSyncEnabled`, `onPremisesSecurityIdentifier`
+**AD** — `AD_objectGUID` (join key), `AD_objectSid`, `AD_pwdLastSet` (best liveness signal — 30-day auto-rotation), `AD_lastLogonTimestamp`, `AD_enabled`, `AD_operatingSystem`, `AD_ou_calc`, `AD_hasUserCertificate_calc` (hybrid-join candidate indicator)
 
-**Intune** — `azureADDeviceId` + `serialNumber` (the two join keys), `lastSyncDateTime` (most reliable liveness signal in the estate), `managementState`, `managementAgent`, `deviceEnrollmentType`, `complianceState`, `isEncrypted`
+**Entra** — `Entra_deviceId` (join key), `Entra_trustType` (`ServerAd` / `AzureAd` / `Workplace` — determines cleanup path), `Entra_approximateLastSignInDateTime`, `Entra_accountEnabled`, `Entra_isManaged`, `Entra_onPremisesSyncEnabled`, `Entra_onPremisesSecurityIdentifier`
 
-**Freshservice** — `display_id`, `type_fields.serial_number*` (join key), `asset_state*`, `asset_type_id`, `user_id`, `updated_at`
+**Intune** — `Intune_azureADDeviceId` + `Intune_serialNumber` (the two join keys), `Intune_lastSyncDateTime` (most reliable liveness signal in the estate), `Intune_managementState`, `Intune_managementAgent`, `Intune_deviceEnrollmentType`, `Intune_complianceState`, `Intune_isEncrypted`
+
+**Freshservice** — `FS_display_id`, `FS_type_fields.serial_number` (join key), `FS_type_fields.asset_state`, `FS_asset_type_id`, `FS_user_id`, `FS_updated_at`
 
 ---
 
@@ -213,9 +243,9 @@ Both carry more weight than "our device lists are messy."
 
 | Item | Owner | Notes |
 |---|---|---|
-| ASM extraction method | Bruno | API requires an API account + ES256 JWT signing. UI export gives serial, model, MDM assignment — sufficient for a first pass |
-| Baseline row counts per system | Bruno | Needed before joining; large discrepancies indicate extraction problems, not estate problems |
-| Whether EAS-only devices count as "computers" | Bruno | Affects every cross-system total |
-| Freshservice asset type hierarchy | Bruno | Determines the Excel filter for "computers" |
+| ASM extraction method | Bruno | API requires an API account + ES256 JWT signing. UI export gives serial, model, MDM assignment — sufficient for a first pass. Drop the export into the snapshot folder as `07-asm-devices.csv` |
+| Baseline row counts per system | Bruno | Needed before joining; large discrepancies indicate extraction problems, not estate problems. Now emitted automatically to `_manifest.csv` — still needs comparing against each system's own UI |
+| Whether EAS-only devices count as "computers" | Bruno | Affects every cross-system total. Flagged per-row as `Intune_isEasOnly_calc` |
+| Freshservice asset type hierarchy | Bruno | Determines the Excel filter for "computers". Now extracted with the full parent chain in `FST_path_calc` (`Hardware > Computer > Laptop`) |
 | Staleness thresholds | Deferred | Post-assessment, by design |
 | Field authority model (which system owns which field) | Deferred | Prerequisite for preventing recurrence |
