@@ -4,8 +4,7 @@
 **Status:** Extraction in progress
 **Last updated:** 2026-07-31
 
-This is the *why*. For the *how*, see [setup.md](setup.md), [runbook.md](runbook.md),
-[data-dictionary.md](data-dictionary.md) and [join-model.md](join-model.md).
+This is the *why*. The *how* is one script — see [README.md](../README.md).
 
 ---
 
@@ -150,12 +149,6 @@ Freshservice is the awkward case, because its `type_fields` keys carry a numeric
 
 The third file is the one that matters. The previous implementation read seven named fields and silently discarded every other custom attribute on every asset.
 
-### Decision 10 — Raw sidecars alongside every curated extract
-
-*Decision:* each phase writes the complete untransformed source response to `raw\<file>.jsonl` next to its curated CSV.
-
-*Rationale:* the curated CSVs are a deliberate subset, and subsets chosen before the data is understood are usually wrong. The sidecar means adding a column later is a re-read of a snapshot rather than another authenticated pull against production — and it makes "the extract never showed us that field" impossible.
-
 ---
 
 ## 4. Conventions
@@ -176,21 +169,20 @@ These are load-bearing. Breaking any of them causes joins to fail silently.
 
 ## 5. Extraction status
 
-| Phase | System | Method | Script | Status |
-|---|---|---|---|---|
-| 1 | Active Directory | `Get-ADComputer`, RSAT module | `src/01-Export-ADComputers.ps1` | Script delivered |
-| 2 | Entra ID | Graph, cert auth | `src/02-Export-EntraDevices.ps1` | Script delivered |
-| 3 | Intune (+ Autopilot, BitLocker) | Graph, cert auth | `src/03-Export-IntuneDevices.ps1` | Script delivered |
-| 4 | Freshservice | REST API v2, Basic auth | `src/04-Export-Freshservice.ps1` | Script delivered |
-| 5 | Apple School Manager | TBD — API or UI export | — | **Not started** |
+| Phase | System | Method | Status |
+|---|---|---|---|
+| 1 | Active Directory | `Get-ADComputer`, RSAT module | Delivered |
+| 2 | Entra ID | Graph, cert auth | Delivered |
+| 3 | Intune (+ Autopilot, BitLocker) | Graph, cert auth | Delivered |
+| 4 | Freshservice | REST API v2, Basic auth | Delivered |
+| 5 | Apple School Manager | TBD — API or UI export | **Not started** |
 
-Each phase produces one or more CSVs into `C:\estate-audit\<yyyy-MM-dd>\`, with the
-untransformed source response alongside in `raw\`. `src/Invoke-Assessment.ps1` runs
-phases 1–4 into a single snapshot.
+All four phases live in `Export-DeviceEstate.ps1` and write CSVs into
+`C:\estate-audit\<yyyy-MM-dd>\`.
 
 ### Key fields by system
 
-Column names below are as emitted. Full listing in [data-dictionary.md](data-dictionary.md).
+Column names below are as emitted.
 
 **AD** — `AD_objectGUID` (join key), `AD_objectSid`, `AD_pwdLastSet` (best liveness signal — 30-day auto-rotation), `AD_lastLogonTimestamp`, `AD_enabled`, `AD_operatingSystem`, `AD_ou_calc`, `AD_hasUserCertificate_calc` (hybrid-join candidate indicator)
 

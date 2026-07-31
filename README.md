@@ -1,136 +1,120 @@
 # Devices Assessment
 
-Read-only extraction and reconciliation of every computer record across five
-systems, so that "which of our device records are garbage?" can be answered from
-evidence instead of assumption.
+One script that pulls computer records out of AD, Entra, Intune, Autopilot,
+BitLocker and Freshservice into CSVs, ready to load into Excel and reconcile.
 
-| System | Holds |
-|---|---|
-| Active Directory | Domain-joined computer objects |
-| Microsoft Entra ID | Device identities (hybrid joined, Entra joined, registered) |
-| Microsoft Intune | Managed devices, Autopilot registrations, BitLocker key escrow |
-| Apple School Manager | Apple hardware owned by the institution (ADE) |
-| Freshservice | Asset/CMDB records with business and financial attributes |
+Read-only. Nothing here disables, deletes, retires or releases anything —
+remediation stays out of scope until the data is understood
+([decision-record.md](docs/decision-record.md), Decision 1).
 
-**Nothing here writes, disables, deletes, retires or releases anything.**
-Remediation is deliberately out of scope until the data is understood — see
-[decision-record.md](docs/decision-record.md), Decision 1.
+## Run it
 
----
+```powershell
+.\Export-DeviceEstate.ps1
+```
 
-## Quick start
+Writes to `C:\estate-audit\<today>\`. Options:
+
+```powershell
+.\Export-DeviceEstate.ps1 -OutputPath D:\audit
+.\Export-DeviceEstate.ps1 -Phase Freshservice
+.\Export-DeviceEstate.ps1 -Phase AD,Entra -OutputPath D:\audit
+```
+
+## Setup
 
 ```powershell
 Install-Module Microsoft.Graph -Scope CurrentUser
-Copy-Item .\config\config.example.ps1 .\config\config.local.ps1
+Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0
 ```
 
-Fill in `config.local.ps1` (it is git-ignored), then:
+Credentials come from environment variables — nothing secret is in this repo:
 
 ```powershell
-. .\config\config.local.ps1
-.\src\Invoke-Assessment.ps1
+$env:ESTATE_GRAPH_APP_ID     = '<app id>'
+$env:ESTATE_GRAPH_TENANT_ID  = '<tenant id>'
+$env:ESTATE_GRAPH_CERT_THUMB = '<cert thumbprint in CurrentUser\My>'
+$env:FRESHSERVICE_DOMAIN     = 'dbu.freshservice.com'
+$env:FRESHSERVICE_API_KEY    = '<api key>'
 ```
 
-That writes a dated snapshot to `C:\estate-audit\<yyyy-MM-dd>\`. Full
-prerequisites, app registration and permissions are in [setup.md](docs/setup.md).
+Add `-Verbose`-style overrides on the command line instead if you prefer:
+`-AppId`, `-TenantId`, `-CertThumbprint`, `-FreshserviceDomain`, `-FreshserviceApiKey`.
 
-Run a single phase:
+Graph app permissions (application, least-privileged, all read-only):
+`Device.Read.All`, `DeviceManagementManagedDevices.Read.All`,
+`DeviceManagementServiceConfig.Read.All`, `BitlockerKey.ReadBasic.All`.
+Grant admin consent — without it the extracts come back empty rather than
+erroring, which reads like an estate finding.
+
+Certificate auth, not a client secret ([decision-record.md](docs/decision-record.md), Decision 5):
 
 ```powershell
-.\src\Invoke-Assessment.ps1 -Phase Freshservice
+$cert = New-SelfSignedCertificate -Subject "CN=DevicesAssessment" `
+    -CertStoreLocation "Cert:\CurrentUser\My" -KeyExportPolicy NonExportable `
+    -KeySpec Signature -NotAfter (Get-Date).AddYears(2)
+$cert.Thumbprint
+Export-Certificate -Cert $cert -FilePath "$env:TEMP\DevicesAssessment.cer"
 ```
 
-Verify the shared normalization helpers — no credentials or network required:
+Upload the `.cer` to the app registration. Never commit the private key.
 
-```powershell
-.\tests\Test-EstateAudit.ps1
-```
+## Output
 
----
+| File | Contents |
+|---|---|
+| `01-ad-computers.csv` | AD computer objects |
+| `02-entra-devices.csv` | Entra device identities |
+| `03-intune-devices.csv` | Intune managed devices — **the join hub** |
+| `04-autopilot.csv` | Autopilot registrations |
+| `05-bitlocker-escrow.csv` | Devices with escrowed BitLocker keys |
+| `06-freshservice-assets.csv` | Freshservice assets |
+| `06b-fs-asset-types.csv` | Asset type hierarchy, with the full path per type |
+| `06c-fs-type-fields-long.csv` | Every Freshservice custom field, under its exact API key |
 
-## Repository layout
+Apple School Manager is not automated. Export from the UI and drop it in as
+`07-asm-devices.csv`.
 
-```
-src/
-  EstateAudit.psm1              shared helpers: snapshots, normalization, CSV + manifest
-  EstateGraph.psm1              Graph certificate authentication
-  01-Export-ADComputers.ps1     phase 1
-  02-Export-EntraDevices.ps1    phase 2
-  03-Export-IntuneDevices.ps1   phase 3 - managed devices, Autopilot, BitLocker
-  04-Export-Freshservice.ps1    phase 4 - assets, asset types, all custom fields
-  Invoke-Assessment.ps1         runs every phase into one snapshot
-config/
-  config.example.ps1            template; copy to config.local.ps1
-tests/
-  Test-EstateAudit.ps1          helper tests; no credentials or network needed
-docs/
-  decision-record.md            why the assessment is shaped this way
-  setup.md                      prerequisites, permissions, credentials
-  runbook.md                    running a cycle, validating it, troubleshooting
-  data-dictionary.md            every emitted column and its source attribute
-  join-model.md                 join keys and the Power Query merge
-```
+The script prints row counts at the end. **Compare them against each system's own
+UI before joining** — a large gap is an extraction problem, not an estate problem.
 
-## Snapshot layout
+## Column names
 
 ```
-C:\estate-audit\2026-07-31\
-  01-ad-computers.csv           02-entra-devices.csv
-  03-intune-devices.csv         04-autopilot.csv
-  05-bitlocker-escrow.csv       06-freshservice-assets.csv
-  06b-fs-asset-types.csv        06c-fs-type-fields-long.csv
-  07-asm-devices.csv            (manual — Apple School Manager UI export)
-  raw\                          complete untransformed source responses (.jsonl)
-  _manifest.csv                 row and column counts per file
-  _run.log                      timestamped transcript
+<Prefix>_<exactSourceAttributeName>    value as the source system returns it
+<Prefix>_<name>_calc                   worked out by the script
 ```
 
-Snapshots are immutable by convention: all transformation happens downstream in
-Power Query, so a suspect number can always be traced to either the data or the
-logic. They are also git-ignored — they contain hostnames, serials, usernames and
-OU structure for the entire estate.
+So `Entra_approximateLastSignInDateTime`, not `Entra_LastSignIn`. Any column
+without `_calc` can be looked up in the vendor's own documentation under that
+name. Prefixes: `AD_`, `Entra_`, `Intune_`, `AP_`, `BL_`, `FS_`, `FST_`.
 
----
+## What changed from the original four scripts
 
-## Column naming
+Renamed columns — **this breaks any existing Power Query work**:
 
-```
-<Prefix>_<exactSourceAttributeName>     value as the source system returns it
-<Prefix>_<name>_calc                    derived here, not a source field
-```
+| Before | After |
+|---|---|
+| `AD_PasswordLastSet` | `AD_pwdLastSet` |
+| `AD_LastLogonDate` | `AD_lastLogonTimestamp` |
+| `Entra_LastSignIn` | `Entra_approximateLastSignInDateTime` |
+| `Entra_Enabled` | `Entra_accountEnabled` |
+| `Intune_AadDeviceId` | `Intune_azureADDeviceId` |
+| `Intune_SerialRaw` / `SerialNorm` | `Intune_serialNumber` / `Intune_serialNumber_normalized_calc` |
+| `FS_SerialRaw` | `FS_type_fields.serial_number` |
 
-`Entra_approximateLastSignInDateTime`, not `Entra_LastSignIn`. The alias saved
-typing and cost traceability: with roughly 60 merged columns, a name that appears
-in no vendor documentation has to be mentally translated before the Graph
-reference, its caveats, or a support case makes sense. See
-[decision-record.md](docs/decision-record.md), Decision 9, and
-[data-dictionary.md](docs/data-dictionary.md) for the full listing.
+Bugs fixed:
 
-Prefixes: `AD_`, `Entra_`, `Intune_`, `AP_` (Autopilot), `BL_` (BitLocker),
-`FS_` (Freshservice assets), `FST_` (Freshservice asset types).
-
----
-
-## Status
-
-| Phase | System | Status |
-|---|---|---|
-| 1 | Active Directory | Script delivered |
-| 2 | Entra ID | Script delivered |
-| 3 | Intune, Autopilot, BitLocker | Script delivered |
-| 4 | Freshservice | Script delivered |
-| 5 | Apple School Manager | **Not automated** — UI export, see [decision-record.md](docs/decision-record.md) §8 |
-| — | Power Query join | Documented in [join-model.md](docs/join-model.md), workbook not yet committed |
-
----
-
-## Security notes
-
-- Certificate authentication only for Graph. No client secret is stored anywhere,
-  least of all in a shareable workbook — [decision-record.md](docs/decision-record.md), Decision 5.
-- Graph permissions are least-privileged per endpoint. `BitlockerKey.ReadBasic.All`
-  returns key *metadata*; recovery keys are never requested and could not be read
-  with this permission if they were.
-- Credentials come from environment variables. `config.local.ps1`, `*.pfx`, `*.key`
-  and all extracted data are git-ignored.
+- Freshservice `type_fields` were matched by prefix, so `os` also matched
+  `os_version` and `os_service_pack` — which one won depended on property order.
+  Now anchored to `<name>` or `<name>_<digits>`.
+- Every custom Freshservice field except seven named ones was silently dropped.
+  All of them now land in `06c-fs-type-fields-long.csv` under their exact keys.
+- `Retry-After` parsing was broken on PowerShell 6+, so rate-limited requests
+  always fell back to a 30-second guess.
+- AD `DNSHostName` was requested but never written out.
+- All four scripts wrote to a flat `C:\estate-audit\`, overwriting the previous
+  run despite the dated-snapshot convention.
+- Day counts rounded instead of flooring — 9.7 days reported as 10.
+- The Freshservice API key was a literal in the script; `$appId`, `$tenantId`
+  and `$thumb` were undefined variables.

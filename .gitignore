@@ -1,43 +1,11 @@
-# ---------------------------------------------------------------------------
-# Secrets - never commit
-# ---------------------------------------------------------------------------
-config/config.local.ps1
+# Extracted data - hostnames, serials, usernames, OU structure for the whole estate
+*.csv
+*.xlsx
+estate-audit/
+
+# Secrets
 *.local.ps1
 *.pfx
 *.p12
 *.key
 *.pem
-
-# ---------------------------------------------------------------------------
-# Extracted data
-# ---------------------------------------------------------------------------
-# Snapshots contain hostnames, serials, usernames and OU structure for the whole
-# estate. They belong on managed storage, not in source control.
-estate-audit/
-snapshots/
-output/
-*.jsonl
-07-asm-*.csv
-
-# The extracts themselves. Documentation samples under docs/ are re-included.
-*.csv
-!docs/**/*.csv
-
-# ---------------------------------------------------------------------------
-# Excel
-# ---------------------------------------------------------------------------
-~$*.xlsx
-~$*.xlsm
-*.xlsx
-*.xlsm
-!templates/*.xlsx
-
-# ---------------------------------------------------------------------------
-# Editors and OS
-# ---------------------------------------------------------------------------
-.vs/
-.vscode/
-.idea/
-Thumbs.db
-desktop.ini
-*.swp
