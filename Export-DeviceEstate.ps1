@@ -93,6 +93,19 @@ function Norm-Serial {
     if ($JunkSerials -contains $s -or $s.Length -lt 4 -or $s -match '^(.)\1+$') { $null } else { $s }
 }
 
+# Readable top-down OU path: CN=PC1,OU=Laptops,OU=IT,DC=dbu,DC=edu -> "IT \ Laptops"
+# Drops the leaf CN and every DC segment, then reverses. Filtering DC= by name
+# rather than by a fixed offset keeps this correct whatever the domain depth.
+function Friendly-OUPath {
+    param($DistinguishedName)
+    if (-not $DistinguishedName) { return $null }
+    # (?<!\\) so an escaped comma inside a name isn't treated as a separator.
+    $segs = @($DistinguishedName -split '(?<!\\),' | Select-Object -Skip 1 | Where-Object { $_ -notmatch '^\s*DC=' })
+    if (-not $segs.Count) { return 'Root' }
+    [array]::Reverse($segs)
+    ($segs -replace '^\s*(OU|CN)=', '' -replace '\\,', ',') -join ' \ '
+}
+
 function Fmt-Date {
     param($Value, [switch]$WithTime)
     if (-not $Value) { return $null }
@@ -186,6 +199,7 @@ if ($Phase -contains 'AD') {
             AD_lastLogonTimestamp_isFuture_calc = ($lastLogon -and $lastLogon -gt $now)
             AD_pwdLastSet_days_calc             = Days-Since $_.PasswordLastSet
             AD_ou_calc                          = ($_.DistinguishedName -split ',', 2)[1]
+            AD_friendlyOUPath_calc              = Friendly-OUPath $_.DistinguishedName
             AD_hasUserCertificate_calc          = ($null -ne $_.userCertificate -and @($_.userCertificate).Count -gt 0)
         }
     } | Save -Name '01-ad-computers.csv'
