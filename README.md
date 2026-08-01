@@ -13,13 +13,21 @@ remediation stays out of scope until the data is understood
 .\Export-DeviceEstate.ps1
 ```
 
-Writes to `C:\estate-audit\<today>\`. Options:
+You'll get a browser sign-in prompt for Graph. Writes to `C:\estate-audit\<today>\`.
 
 ```powershell
+.\Export-DeviceEstate.ps1 -Server adc.dbu.edu
 .\Export-DeviceEstate.ps1 -OutputPath D:\audit
 .\Export-DeviceEstate.ps1 -Phase Freshservice
-.\Export-DeviceEstate.ps1 -Phase AD,Entra -OutputPath D:\audit
+.\Export-DeviceEstate.ps1 -Phase AD,Entra -Server adc.dbu.edu -OutputPath D:\audit
 ```
+
+| Parameter | Default |
+|---|---|
+| `-OutputPath` | `C:\estate-audit\<today>` |
+| `-Phase` | all four: `AD`, `Entra`, `Intune`, `Freshservice` |
+| `-Server` | your logon DC |
+| `-GraphAuth` | `Interactive` — or `Certificate` for app-only |
 
 ## Setup
 
@@ -28,26 +36,45 @@ Install-Module Microsoft.Graph -Scope CurrentUser
 Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0
 ```
 
-Credentials come from environment variables — nothing secret is in this repo:
+Freshservice credentials come from the environment — nothing secret is in this repo:
+
+```powershell
+$env:FRESHSERVICE_DOMAIN  = 'dbu.freshservice.com'
+$env:FRESHSERVICE_API_KEY = '<api key>'
+```
+
+Or pass `-FreshserviceDomain` / `-FreshserviceApiKey` on the command line.
+
+## Graph access
+
+Permissions are the same names either way, all read-only:
+`Device.Read.All`, `DeviceManagementManagedDevices.Read.All`,
+`DeviceManagementServiceConfig.Read.All`, `BitlockerKey.ReadBasic.All`.
+
+**Signing in as yourself (default).** The script requests those scopes at sign-in.
+Delegated access is the intersection of what the app may do and what *you* may do,
+so your Entra role decides how much of the tenant comes back — **Global Reader is
+enough** for all four phases.
+
+> ⚠️ **BitLocker is the one to watch.** With delegated access you only get keys for
+> devices *you personally own*, unless you hold Global reader, Security reader,
+> Cloud device administrator, Helpdesk administrator, Intune service administrator
+> or Security administrator. Without one of those, `05-bitlocker-escrow.csv` comes
+> back nearly empty and looks like an estate-wide encryption gap. It isn't one.
+> The script prints a reminder at that step.
+
+**App-only (`-GraphAuth Certificate`).** Certificate, not a client secret
+([decision-record.md](docs/decision-record.md), Decision 5). Set the app
+registration up, grant admin consent, then:
 
 ```powershell
 $env:ESTATE_GRAPH_APP_ID     = '<app id>'
 $env:ESTATE_GRAPH_TENANT_ID  = '<tenant id>'
 $env:ESTATE_GRAPH_CERT_THUMB = '<cert thumbprint in CurrentUser\My>'
-$env:FRESHSERVICE_DOMAIN     = 'dbu.freshservice.com'
-$env:FRESHSERVICE_API_KEY    = '<api key>'
+.\Export-DeviceEstate.ps1 -GraphAuth Certificate
 ```
 
-Add `-Verbose`-style overrides on the command line instead if you prefer:
-`-AppId`, `-TenantId`, `-CertThumbprint`, `-FreshserviceDomain`, `-FreshserviceApiKey`.
-
-Graph app permissions (application, least-privileged, all read-only):
-`Device.Read.All`, `DeviceManagementManagedDevices.Read.All`,
-`DeviceManagementServiceConfig.Read.All`, `BitlockerKey.ReadBasic.All`.
-Grant admin consent — without it the extracts come back empty rather than
-erroring, which reads like an estate finding.
-
-Certificate auth, not a client secret ([decision-record.md](docs/decision-record.md), Decision 5):
+Create the certificate with:
 
 ```powershell
 $cert = New-SelfSignedCertificate -Subject "CN=DevicesAssessment" `
@@ -58,6 +85,8 @@ Export-Certificate -Cert $cert -FilePath "$env:TEMP\DevicesAssessment.cer"
 ```
 
 Upload the `.cer` to the app registration. Never commit the private key.
+Without admin consent the extracts come back empty rather than erroring, which
+reads like an estate finding.
 
 ## Output
 

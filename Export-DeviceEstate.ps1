@@ -17,20 +17,32 @@
 .PARAMETER Phase
     Which systems to pull. Defaults to all of them.
 
+.PARAMETER Server
+    Domain controller to query for the AD phase. Defaults to your logon DC.
+
+.PARAMETER GraphAuth
+    Interactive  - sign in as yourself in a browser (default).
+    Certificate  - app-only, using -AppId / -TenantId / -CertThumbprint.
+
 .EXAMPLE
     .\Export-DeviceEstate.ps1
 
 .EXAMPLE
-    .\Export-DeviceEstate.ps1 -OutputPath D:\audit -Phase Freshservice
+    .\Export-DeviceEstate.ps1 -Server dc01.dbu.edu -OutputPath D:\audit
+
+.EXAMPLE
+    .\Export-DeviceEstate.ps1 -GraphAuth Certificate
 
 .NOTES
-    Credentials come from environment variables (see README):
-        ESTATE_GRAPH_APP_ID, ESTATE_GRAPH_TENANT_ID, ESTATE_GRAPH_CERT_THUMB
-        FRESHSERVICE_DOMAIN, FRESHSERVICE_API_KEY
+    Freshservice credentials come from FRESHSERVICE_DOMAIN and
+    FRESHSERVICE_API_KEY (or the matching parameters).
 
-    Graph app permissions: Device.Read.All,
-    DeviceManagementManagedDevices.Read.All, DeviceManagementServiceConfig.Read.All,
-    BitlockerKey.ReadBasic.All
+    Graph permissions, same names for delegated and app-only:
+        Device.Read.All, DeviceManagementManagedDevices.Read.All,
+        DeviceManagementServiceConfig.Read.All, BitlockerKey.ReadBasic.All
+
+    Signing in as yourself needs an Entra role that can read the whole tenant -
+    Global Reader is enough. See the BitLocker warning in the Intune phase.
 #>
 [CmdletBinding()]
 param(
@@ -38,6 +50,11 @@ param(
 
     [ValidateSet('AD', 'Entra', 'Intune', 'Freshservice')]
     [string[]] $Phase = @('AD', 'Entra', 'Intune', 'Freshservice'),
+
+    [string] $Server,
+
+    [ValidateSet('Interactive', 'Certificate')]
+    [string] $GraphAuth = 'Interactive',
 
     [string] $AppId    = $env:ESTATE_GRAPH_APP_ID,
     [string] $TenantId = $env:ESTATE_GRAPH_TENANT_ID,
@@ -102,13 +119,33 @@ function Save {
     }
 }
 
+$GraphScopes = 'Device.Read.All', 'DeviceManagementManagedDevices.Read.All',
+               'DeviceManagementServiceConfig.Read.All', 'BitlockerKey.ReadBasic.All'
+$script:GraphConnected = $false
+
 function Connect-Graph {
-    $context = try { Get-MgContext } catch { throw "Microsoft Graph SDK not found. Run: Install-Module Microsoft.Graph -Scope CurrentUser" }
-    if ($context -and $context.ClientId -eq $AppId) { return }
-    if (-not $AppId -or -not $TenantId -or -not $CertThumbprint) {
-        throw "Graph credentials missing. Set ESTATE_GRAPH_APP_ID, ESTATE_GRAPH_TENANT_ID and ESTATE_GRAPH_CERT_THUMB (see README)."
+    if ($script:GraphConnected) { return }
+    try { Get-MgContext | Out-Null }
+    catch { throw "Microsoft Graph SDK not found. Run: Install-Module Microsoft.Graph -Scope CurrentUser" }
+
+    if ($GraphAuth -eq 'Certificate') {
+        if (-not $AppId -or -not $TenantId -or -not $CertThumbprint) {
+            throw "-GraphAuth Certificate needs -AppId, -TenantId and -CertThumbprint (or ESTATE_GRAPH_* environment variables)."
+        }
+        Connect-MgGraph -ClientId $AppId -TenantId $TenantId -CertificateThumbprint $CertThumbprint -NoWelcome
+        Say "   signed in as app $AppId"
     }
-    Connect-MgGraph -ClientId $AppId -TenantId $TenantId -CertificateThumbprint $CertThumbprint -NoWelcome
+    else {
+        # Signing in as yourself. Delegated access is the intersection of what
+        # the app may do and what you may do, so your Entra role decides how
+        # much of the tenant comes back.
+        $signIn = @{ Scopes = $GraphScopes; NoWelcome = $true }
+        if ($TenantId) { $signIn.TenantId = $TenantId }
+        Connect-MgGraph @signIn
+        $account = (Get-MgContext).Account
+        Say "   signed in as $account"
+    }
+    $script:GraphConnected = $true
 }
 
 Say "Device estate extract -> $OutputPath" 'White'
@@ -123,7 +160,10 @@ if ($Phase -contains 'AD') {
     $props = 'DNSHostName','OperatingSystem','OperatingSystemVersion','LastLogonTimeStamp',
              'PasswordLastSet','whenCreated','Description','userCertificate'
 
-    Get-ADComputer -Filter * -Properties $props -ResultPageSize 1000 | ForEach-Object {
+    $ad = @{ Filter = '*'; Properties = $props; ResultPageSize = 1000 }
+    if ($Server) { $ad.Server = $Server; Say "   querying $Server" }
+
+    Get-ADComputer @ad | ForEach-Object {
 
         # lastLogonTimestamp is a FILETIME integer, and it only replicates once
         # the stored value is 9-14 days old. pwdLastSet is the better signal.
@@ -249,6 +289,14 @@ if ($Phase -contains 'Intune') {
 
     # Metadata only - ReadBasic.All cannot return recovery keys, and we don't ask.
     Say '   BitLocker key escrow...'
+    if ($GraphAuth -eq 'Interactive') {
+        # Delegated BitLocker access returns ONLY devices you personally own,
+        # unless you hold Global reader / Security reader / Cloud device admin /
+        # Helpdesk admin / Intune service admin / Security admin. Without one of
+        # those this file comes back nearly empty and looks like an estate-wide
+        # encryption gap, which it is not.
+        Say '   (delegated: needs Global reader or similar, or you only get your own devices)' 'DarkYellow'
+    }
     Get-MgInformationProtectionBitlockerRecoveryKey -All | Group-Object DeviceId | ForEach-Object {
         [pscustomobject]@{
             BL_deviceId            = Norm-Guid $_.Name
