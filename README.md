@@ -147,3 +147,14 @@ Bugs fixed:
 - Day counts rounded instead of flooring — 9.7 days reported as 10.
 - The Freshservice API key was a literal in the script; `$appId`, `$tenantId`
   and `$thumb` were undefined variables.
+- Graph returns UTC timestamps and the script compared them against local time,
+  shifting every Entra, Intune and Freshservice day count by the UTC offset.
+  Devices that had just synced reported `-1` days.
+- `onPremisesSecurityIdentifier` is not in Graph's default projection for
+  devices, so it needed an explicit `$select`. Without it the
+  `objectSid → onPremisesSecurityIdentifier` cross-check on the AD→Entra join
+  came back empty.
+
+Dropped, because both are beta-only and returned empty on every row:
+`Intune_managementState` (use `complianceState` / `deviceRegistrationState`) and
+`AP_deploymentProfileAssignmentStatus` (replaced by `AP_lastContactedDateTime`).

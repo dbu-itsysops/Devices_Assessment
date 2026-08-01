@@ -106,10 +106,24 @@ function Friendly-OUPath {
     ($segs -replace '^\s*(OU|CN)=', '' -replace '\\,', ',') -join ' \ '
 }
 
+# Graph hands back UTC (DateTimeOffset, or DateTime with Kind=Utc); AD's
+# FromFileTime hands back local. Subtracting the two without normalising shifts
+# every Graph day-count by the UTC offset, which is why devices that had just
+# synced were reporting -1 days. Everything is put on local time here so the
+# numbers agree with what the portals show.
+function To-Local {
+    param($Value)
+    if ($null -eq $Value -or "$Value" -eq '') { return $null }
+    if ($Value -is [datetimeoffset]) { return $Value.LocalDateTime }
+    $d = [datetime]$Value
+    if ($d.Kind -eq [System.DateTimeKind]::Utc) { return $d.ToLocalTime() }
+    $d
+}
+
 function Fmt-Date {
     param($Value, [switch]$WithTime)
-    if (-not $Value) { return $null }
-    $d = [datetime]$Value
+    $d = To-Local $Value
+    if (-not $d) { return $null }
     if ($WithTime) { $d.ToString('yyyy-MM-dd HH:mm') } else { $d.ToString('yyyy-MM-dd') }
 }
 
@@ -117,8 +131,9 @@ function Fmt-Date {
 # Negatives are kept - a future date means DC clock drift, which is a finding.
 function Days-Since {
     param($Value)
-    if (-not $Value) { return $null }
-    [int][math]::Floor(($now - [datetime]$Value).TotalDays)
+    $d = To-Local $Value
+    if (-not $d) { return $null }
+    [int][math]::Floor(($now - $d).TotalDays)
 }
 
 function Save {
@@ -211,7 +226,15 @@ if ($Phase -contains 'Entra') {
     Step '[2/4] Entra ID'
     Connect-Graph
 
-    Get-MgDevice -All -PageSize 999 | ForEach-Object {
+    # Explicit $select. onPremisesSecurityIdentifier is NOT in the default
+    # projection, and without it the objectSid -> onPremSid path in Decision 4
+    # comes back empty, losing the cross-check on the objectGUID join.
+    $entraProps = 'id,deviceId,displayName,operatingSystem,operatingSystemVersion,trustType,' +
+                  'profileType,accountEnabled,isCompliant,isManaged,managementType,deviceOwnership,' +
+                  'approximateLastSignInDateTime,registrationDateTime,onPremisesSyncEnabled,' +
+                  'onPremisesSecurityIdentifier'
+
+    Get-MgDevice -All -PageSize 999 -Property $entraProps | ForEach-Object {
         [pscustomobject]@{
             Entra_id                            = $_.Id
             Entra_deviceId                      = Norm-Guid $_.DeviceId
@@ -257,7 +280,8 @@ if ($Phase -contains 'Intune') {
             Intune_osVersion                 = $_.OsVersion
             Intune_manufacturer              = $_.Manufacturer
             Intune_model                     = $_.Model
-            Intune_managementState           = $_.ManagementState
+            # managementState is beta-only - it returned empty on every row.
+            # complianceState and deviceRegistrationState carry the same signal.
             Intune_complianceState           = $_.ComplianceState
             Intune_deviceRegistrationState   = $_.DeviceRegistrationState
             # 'eas' = Exchange ActiveSync only, usually a personal phone.
@@ -294,7 +318,10 @@ if ($Phase -contains 'Intune') {
             AP_model                             = $_.Model
             AP_groupTag                          = $_.GroupTag
             AP_enrollmentState                   = $_.EnrollmentState
-            AP_deploymentProfileAssignmentStatus = $_.DeploymentProfileAssignmentStatus
+            # deploymentProfileAssignmentStatus is beta-only and came back empty
+            # on every row. lastContactedDateTime is on v1.0 and is the useful
+            # liveness signal for an Autopilot record anyway.
+            AP_lastContactedDateTime             = Fmt-Date $_.LastContactedDateTime
 
             AP_serialNumber_normalized_calc      = Norm-Serial $_.SerialNumber
             AP_isPresentInAutopilot_calc         = $true
